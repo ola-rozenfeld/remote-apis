@@ -14,6 +14,7 @@ proto_library(
         "@googleapis//:google_longrunning_operations_proto",
         "@googleapis//:google_rpc_status_proto",
     ],
+    proto_source_root = package_name(),
 )
 
 java_proto_library(
