@@ -33,3 +33,8 @@ proto_library(
     srcs = ["google/rpc/status.proto"],
     deps = ["@com_google_protobuf//:any_proto"],
 )
+
+java_proto_library(
+    name = "google_longrunning_operations_java_proto",
+    deps = [":google_longrunning_operations_proto"],
+)

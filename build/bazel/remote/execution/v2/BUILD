@@ -1,5 +1,7 @@
 package(default_visibility = ["//visibility:public"])
 
+load("@grpc_java//:java_grpc_library.bzl", "java_grpc_library")
+
 licenses(["notice"])
 
 proto_library(
@@ -14,10 +16,18 @@ proto_library(
         "@googleapis//:google_longrunning_operations_proto",
         "@googleapis//:google_rpc_status_proto",
     ],
-    proto_source_root = package_name(),
 )
 
 java_proto_library(
     name = "remote_execution_java_proto",
     deps = [":remote_execution_proto"],
+)
+
+java_grpc_library(
+    name = "remote_execution_java_grpc",
+    srcs = [":remote_execution_proto"],
+    deps = [
+        ":remote_execution_java_proto",
+        "@com_google_api_grpc_proto_google_common_protos//jar",
+    ],
 )
