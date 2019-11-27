@@ -116,6 +116,10 @@ service Execution {
   rpc WaitExecution(WaitExecutionRequest) returns (stream google.longrunning.Operation) {
     option (google.api.http) = { post: "/v2/{name=operations/**}:waitExecution" body: "*" };
   }
+
+  rpc ExecuteGraph(stream ExecuteGraphRequest) returns (stream ExecuteGraphResponse) {
+    option (google.api.http) = { post: "/v3/{instance_name=**}/graphs:execute" body: "*" };
+  }
 }
 
 // The action cache API is used to query whether a given action has already been
@@ -249,6 +253,14 @@ service ContentAddressableStorage {
   // There are no method-specific errors.
   rpc FindMissingBlobs(FindMissingBlobsRequest) returns (FindMissingBlobsResponse) {
     option (google.api.http) = { post: "/v2/{instance_name=**}/blobs:findMissing" body: "*" };
+  }
+
+  // Given a GraphData will stream the digests that are missing in the CAS.
+  // Errors: FAILED_PRECONDITION when the GraphData itself is missing.
+  rpc FindMissingGraphInputs(FindMissingGraphInputsRequest) returns (stream FindMissingBlobsResponse) {
+    option (google.api.http) = {
+      post: "/v3/{instance_name=**}/graphs:findMissingInputs" body: "*"
+    };
   }
 
   // Upload many blobs at once.
@@ -422,6 +434,37 @@ message Action {
   // not recognized by the server, the server will return an `INVALID_ARGUMENT`
   // error.
   repeated string output_node_properties = 8;
+
+  // The file ids that the action requires (from the graph input tree).
+  // This will be populated instead of input_root for graph actions.
+  repeated int32 input_file_ids = 9;
+}
+
+// The graph contains metadata only, increasing the probability of a CAS hit.
+message ActionGraph {
+  // The root of the Merkle tree of the entire file tree of the graph.
+  // The leaves of the tree will not contain any digests or file node metadata.
+  Digest input_root_metadata = 1;
+  // Action metadata digests. These should be sorted by hash in order to
+  // have canonical graph representations to increase CAS hit ratio.
+  repeated Digest action_metadata_digests = 2;
+}
+
+// The data for a given input file.
+message FileNodeData {
+  // File ids of all inputs are computed from the ActionGraph.
+  int32 file_id = 1;
+  string path = 5;  // Less efficient than file_id, but simpler.
+  // Content digest.
+  Digest digest = 2;
+  bool is_executable = 3;
+  repeated NodeProperty node_properties = 4;
+}
+
+// This is all the server needs to know to query Action cache, but not
+// execute.
+message GraphData {
+  repeated FileNodeData file_node_data = 1;
 }
 
 // A `Command` is the actual command executed by a worker running an
@@ -1097,6 +1140,122 @@ message ResultsCachePolicy {
   // every server will have their own supported range of priorities, and will
   // decide how these map into retention/eviction policy.
   int32 priority = 1;
+}
+
+message FindMissingGraphInputsRequest {
+  // The digest of the GraphData proto from which the input digests are to
+  // be taken.
+  Digest graph_data_digest = 1;
+}
+
+message GraphExecution {
+  // The digest of the ActionGraph proto to execute.
+  Digest graph_digest = 1;
+  // The digest of the overall input data.
+  Digest graph_data_digest = 2;
+  GraphActionCachingOptions action_caching_options = 3;
+  // A digest of the GraphActionCaching proto (digested to fit the gRPC frame).
+  Digest action_caching_options_digest = 4;
+  GraphOutputOptions output_options = 5;
+  // A digest of the GraphOutputOptions proto (digested to fit the gRPC frame).
+  Digest output_options_digest = 6;
+  // Maybe some other options such as ExecutionPolicy and ResultsCachePolicy?
+  // Also, maybe some policy on how often we want to receive updates, and
+  // which updates?
+}
+
+// This can be used to get progress updates on a running execution, if a
+// connection is interrupted.
+message ExecutionToken {
+  // Operation name.
+  string name = 1;
+  // This can be used to get result updates starting from a given page.
+  string page_token = 2;
+}
+
+message ExecuteGraphRequest {
+  // Exactly one of graph_execution or execution_token must be populated
+  // in the first message of the stream.
+
+  // A new execution to be started.
+  GraphExecution graph_execution = 1;
+  // A token of an existing execution to receive updates from (returned by
+  // the server in a previous ExecuteGraphResponse).
+  ExecutionToken execution_token = 2;
+  // Digests of all inputs the client has finished uploading.
+  repeated Digest uploaded_input = 3;
+}
+
+message GraphExecutionProgress {
+  // Number of actions that had accepted cached results.
+  int32 action_cache_hits = 1;
+  // Number of completed executions.
+  int32 completed_executions = 2;
+  // Number of currently executing actions.
+  int32 executions_in_progress = 3;
+  // Number of scheduled executions waiting on missing inputs.
+  int32 waiting_on_inputs = 4;
+  // The total number of inputs to upload.
+  int32 missing_inputs = 5;
+  // Maybe add more (optionally?) populated fields such as some execution metadata.
+}
+
+message ExecuteGraphResponse {
+  // Can be used to resume/tune in to existing execution if the connection is
+  // interrupted.
+  ExecutionToken execution_token = 1;
+  // Progress status/stats.
+  GraphExecutionProgress progress = 2;
+  // The requested action results (based on the GraphOutputOptions).
+  // Note that we assume that an action is defined by its outputs, so there is no
+  // need to send the Action digest here as well to identify which action the
+  // results are from. However, if identifying which action a particular stdout/err
+  // came from is important, we will need to make this a nested message that
+  // includes the Action digest as well.
+  // Important: these ActionResults will only include the data that the client
+  // explicitly asked for in GraphOutputOptions; the data will *always* be inlined
+  // if possible (because there is no reason not to inline it, to save the client
+  // CAS calls!).
+  repeated ActionResult action_results = 3;
+  // Inputs required for action execution that the client needs to upload.
+  // The amount of these digest should equal progress.missing_inputs and may
+  // span multiple messages.
+  repeated Digest missing_inputs = 4;
+}
+
+message GraphActionCachingOptions {
+  // If this is true, this means do not accept action cache results for any action.
+  bool reexecute_all = 1;
+  // Individual actions for which action cache results should NOT be accepted.
+  // These are action metadata digests, same as in Graph.
+  repeated Digest reexecute_actions = 2;
+}
+
+// This message specifies which outputs the client would like to receive and
+// how. By default, only failed Actions will have their full ActionResults
+// streamed back; any particular desired outputs need to be specified.
+message GraphOutputOptions {
+  // If this is true, every individual ActionResult will be streamed back
+  // to the client. This option is a shorter way to specify all the
+  // output paths from all actions + stream_all_stdout + stream_all_stderr.
+  bool stream_all_individual_results = 1;
+  // The particular outputs that the client wants to get streamed back.
+  // These should be sorted.
+  repeated int32 output_file_ids = 2;
+  // If this is true, all non-empty stdout from re-executed actions will be
+  // streamed back to the client.
+  bool stream_executed_stdout = 3;
+  // If this is true, all non-empty stdout from all actions will be
+  // streamed back to the client, regardless of whether they were re-executed or
+  // fetched from the action cache.
+  bool stream_all_stdout = 4;
+  // If this is true, all non-empty stderr from re-executed actions will be
+  // streamed back to the client.
+  bool stream_executed_stderr = 5;
+  // If this is true, all non-empty stderr from all actions will be
+  // streamed back to the client, regardless of whether they were re-executed or
+  // fetched from the action cache.
+  bool stream_all_stderr = 6;
 }
 
 // A request message for
